@@ -27,6 +27,24 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 RTC_DS3231 rtc;
 DHT dht(DHTPIN, DHTTYPE);
 
+const unsigned char wifiOn[] PROGMEM = {
+  0b00111100,
+  0b01111110,
+  0b11111111,
+  0b11111111,
+  0b11111111,
+  0b01111110,
+  0b00111100,
+  0b00000000
+};
+const unsigned char wifiOff[] PROGMEM = { /* same but all 0 */ };
+
+void showWifiIcon(bool connected) {
+  display.drawBitmap(110, 0, connected ? wifiOn : wifiOff,
+                     8, 8, SSD1306_WHITE);
+  display.display();
+}
+
 // Replace with your ESP32-CAM MAC address
 uint8_t partnerMac[] = { 0x88, 0x57, 0x21, 0xC1, 0x98, 0x40 };
 
@@ -74,7 +92,7 @@ void setup() {
   Serial.println(WiFi.macAddress());
   */
 
-Serial.println("Attempting RTC init...");
+  Serial.println("Attempting RTC init...");
   // Check we can find clock module
   if (!rtc.begin()) {
     Serial.println("Couldn't find DS3231");
@@ -175,6 +193,16 @@ void loop() {
   esp_err_t result = esp_now_send(partnerMac,
                                   (uint8_t *)&packet,
                                   sizeof(packet));
+
+  if (result == ESP_OK) {
+    // erase previous icon
+    display.fillRect(110, 0, 8, 8, 0);                        // clear icon area
+    display.drawBitmap(110, 0, wifiOn, 8, 8, SSD1306_WHITE);  // draw icon
+    display.display();                                        // single refresh
+    delay(1000);                                              // keep icon on
+    display.fillRect(110, 0, 8, 8, 0);                        // erase again
+    display.display();                                        // single refresh
+  }
 
   if (result == ESP_OK) {
     Serial.println("ESP-NOW send OK");
