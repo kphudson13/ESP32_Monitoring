@@ -36,6 +36,14 @@ WebServer server(80);
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
+#define TEMP_LOG_FILE "/templog.csv"
+#define MAX_LOG_POINTS 144  // 24hrs at 10min intervals
+
+unsigned long lastLogTime = 0;
+const unsigned long LOG_INTERVAL = 600000;  // 10 minutes in ms
+
+String cachedSVG = "";
+
 // The four target hours for photos
 const uint8_t PHOTO_HOURS[4] = { 0, 6, 12, 18 };
 const uint8_t EMAIL_HOUR = 18;  // Send email after 6pm photo
@@ -157,6 +165,77 @@ camera_fb_t* captureFreshPhoto() {
 
 char attNames[4][32];  // Declare above the loop
 
+String buildTempSVG(uint32_t sinceUnix = 0) {
+  // sinceUnix = 0 means use all available data (web)
+  // sinceUnix > 0 means only plot points after that time (email)
+
+  const int W = 500, H = 200;
+  const int PAD = 40;
+
+  // Read CSV into arrays
+  uint32_t times[MAX_LOG_POINTS];
+  float temps[MAX_LOG_POINTS];
+  int count = 0;
+
+  File f = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+  if (!f) return "<p>No data yet</p>";
+  while (f.available() && count < MAX_LOG_POINTS) {
+    String line = f.readStringUntil('\n');
+    if (line.length() < 3) continue;
+    int comma = line.indexOf(',');
+    if (comma < 0) continue;
+    uint32_t t = (uint32_t)line.substring(0, comma).toInt();
+    float temp = line.substring(comma + 1).toFloat();
+    if (sinceUnix > 0 && t < sinceUnix) continue;
+    times[count] = t;
+    temps[count] = temp;
+    count++;
+  }
+  f.close();
+
+  if (count < 2) return "<p>Not enough data yet</p>"; // will print with at least two points
+
+  // Find min/max
+  float tMin = temps[0], tMax = temps[0];
+  for (int i = 1; i < count; i++) {
+    if (temps[i] < tMin) tMin = temps[i];
+    if (temps[i] > tMax) tMax = temps[i];
+  }
+  // Add padding to range
+  tMin -= 1.0;
+  tMax += 1.0;
+
+  uint32_t xMin = times[0], xMax = times[count - 1];
+
+  // Build SVG
+  String svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + String(W) + "' height='" + String(H) + "'>";
+  svg += "<rect width='100%' height='100%' fill='#f9f9f9' rx='8'/>";
+
+  // Axes
+  svg += "<line x1='" + String(PAD) + "' y1='10' x2='" + String(PAD) + "' y2='" + String(H - PAD) + "' stroke='#333' stroke-width='1'/>";
+  svg += "<line x1='" + String(PAD) + "' y1='" + String(H - PAD) + "' x2='" + String(W - 10) + "' y2='" + String(H - PAD) + "' stroke='#333' stroke-width='1'/>";
+
+  // Polyline points
+  String points = "";
+  for (int i = 0; i < count; i++) {
+    float xRatio = (float)(times[i] - xMin) / (xMax - xMin);
+    float yRatio = (temps[i] - tMin) / (tMax - tMin);
+    int px = PAD + (int)(xRatio * (W - PAD - 10));
+    int py = (H - PAD) - (int)(yRatio * (H - PAD - 10));
+    points += String(px) + "," + String(py) + " ";
+    // Dot
+    svg += "<circle cx='" + String(px) + "' cy='" + String(py) + "' r='3' fill='#e05c2a'/>";
+  }
+  svg += "<polyline points='" + points + "' fill='none' stroke='#e05c2a' stroke-width='1.5'/>";
+
+  // Y-axis labels
+  svg += "<text x='2' y='" + String(H - PAD) + "' font-size='10' fill='#666'>" + String(tMin, 1) + "C</text>";
+  svg += "<text x='2' y='18' font-size='10' fill='#666'>" + String(tMax, 1) + "C</text>";
+
+  svg += "</svg>";
+  return svg;
+}
+
 void sendDailyEmail() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected, attempting reconnect...");
@@ -179,21 +258,20 @@ void sendDailyEmail() {
   message.subject = "Daily Apt. Report";
   message.addRecipient("Kyle", recip_email);
 
+  uint32_t cutoff = lastPacket.unixTime - 86400;
+  String svgChart = buildTempSVG(cutoff);
+
+  String emailBody = "<h2>Daily Apartment Report</h2>";
+  emailBody += "<p><b>Temperature at send time:</b> " + String(lastPacket.temperature, 1) + " &deg;C</p>";
+  emailBody += "<p><b>Humidity:</b> " + String(lastPacket.humidity, 1) + " %</p>";
+  emailBody += "<h3>Temperature - Last 24hrs</h3>";
+  emailBody += svgChart;
+
+  message.html.content = emailBody.c_str();
+  message.html.charSet = "utf-8";
+
   const char* labels[4] = { "12:00 AM", "6:00 AM", "12:00 PM", "6:00 PM" };
   const char* photoHourLabels[4] = { "12am", "6am", "12pm", "6pm" };
-
-  // Build body
-  String body = "Daily apartment report.\n\n";
-  for (int i = 0; i < 4; i++) {
-    body += String(labels[i]) + " — ";
-    if (savedTimes[i] != 0) {
-      body += "Temp: " + String(savedTemps[i], 1) + "C  Hum: " + String(savedHums[i], 0) + "%\n";
-    } else {
-      body += "No sensor data available\n";
-    }
-  }
-  message.text.content = body.c_str();
-  message.text.charSet = "us-ascii";
 
   // Attach photos from SD
   SMTP_Attachment atts[4];
@@ -236,7 +314,8 @@ void sendDailyEmail() {
 
   if (!smtp.connect(&session)) {
     Serial.println("SMTP connect failed");
-    for (int i = 0; i < 4; i++) if (bufs[i]) free(bufs[i]);
+    for (int i = 0; i < 4; i++)
+      if (bufs[i]) free(bufs[i]);
     return;
   }
 
@@ -247,12 +326,13 @@ void sendDailyEmail() {
 
   smtp.closeSession();
 
-  for (int i = 0; i < 4; i++) if (bufs[i]) free(bufs[i]);
+  for (int i = 0; i < 4; i++)
+    if (bufs[i]) free(bufs[i]);
 }
 
 void handleRoot() {
   String html = "<html><head>";
-  html += "<meta http-equiv='refresh' content='30'>";  // Auto refresh every 30s
+  html += "<meta http-equiv='refresh' content='30'>";
   html += "<style>body{font-family:sans-serif;padding:20px;} h1{color:#333;}</style>";
   html += "</head><body>";
   html += "<h1>Apartment Monitor</h1>";
@@ -260,19 +340,59 @@ void handleRoot() {
   if (hasPacket) {
     DateTime now(lastPacket.unixTime);
     char timeStr[32];
-    snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d",
-             now.year(), now.month(), now.day(),
-             now.hour(), now.minute(), now.second());
-
-    html += "<p><b>Last updated:</b> " + String(timeStr) + "</p>";
-    html += "<p><b>Temperature:</b> " + String(lastPacket.temperature, 1) + " C</p>";
-    html += "<p><b>Humidity:</b> " + String(lastPacket.humidity, 0) + " %</p>";
+    snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d",
+             now.year(), now.month(), now.day(), now.hour(), now.minute());
+    html += "<p><b>Last update:</b> " + String(timeStr) + "</p>";
+    html += "<p><b>Current Temp:</b> " + String(lastPacket.temperature, 1) + " &deg;C</p>";
+    html += "<p><b>Humidity:</b> " + String(lastPacket.humidity, 1) + " %</p>";
+    html += "<h2>Temperature - Last 24hrs</h2>";
+    html += cachedSVG.length() > 0 ? cachedSVG : "<p>Not enough data yet</p>";
   } else {
-    html += "<p>No sensor data received yet.</p>";
+    html += "<p>Waiting for sensor data...</p>";
   }
 
   html += "</body></html>";
   server.send(200, "text/html", html);
+}
+
+void logTemperature(float temp, uint32_t unixTime) {
+  // Count existing lines to enforce 144 point rolling window
+  int lineCount = 0;
+  File f = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+  if (f) {
+    while (f.available()) {
+      if (f.read() == '\n') lineCount++;
+    }
+    f.close();
+  }
+
+  // If at max, rewrite file without the first line
+  if (lineCount >= MAX_LOG_POINTS) {
+    File fin = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+    String newContent = "";
+    bool firstLine = true;
+    while (fin.available()) {
+      String line = fin.readStringUntil('\n');
+      if (firstLine) {
+        firstLine = false;
+        continue;
+      }  // skip oldest
+      newContent += line + "\n";
+    }
+    fin.close();
+    File fout = SD_MMC.open(TEMP_LOG_FILE, FILE_WRITE);
+    fout.print(newContent);
+    fout.close();
+  }
+
+  // Append new point
+  File fa = SD_MMC.open(TEMP_LOG_FILE, FILE_APPEND);
+  if (fa) {
+    fa.printf("%u,%.1f\n", unixTime, temp);
+    fa.close();
+  }
+
+  cachedSVG = buildTempSVG();
 }
 
 void setup() {
@@ -327,7 +447,16 @@ void setup() {
   Serial.println("Waiting for first ESP-NOW time packet...");
 }
 
+
 void loop() {
+
+  server.handleClient();  // Launch server
+
+  // Log every 10 minutes
+  if (hasPacket && millis() - lastLogTime >= LOG_INTERVAL) {
+    logTemperature(lastPacket.temperature, lastPacket.unixTime);
+    lastLogTime = millis();
+  }
 
   // Can't do anything without a time reference
   if (!hasPacket) {
@@ -335,6 +464,11 @@ void loop() {
     delay(5000);
     return;
   }
+
+  // Non-blocking 30 second check
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck < 30000) return;
+  lastCheck = millis();
 
   DateTime now(lastPacket.unixTime);
   int today = now.day();
@@ -389,8 +523,4 @@ void loop() {
     sendDailyEmail();
     emailSentToday = true;
   }
-
-  server.handleClient();
-  
-  delay(30000);  // Check every 30 seconds
 }
