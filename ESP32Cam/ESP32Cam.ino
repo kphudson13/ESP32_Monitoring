@@ -1,8 +1,8 @@
-/* 
+/*
 A script to send pictures from an esp32-cam via email
-You need a credentials file to make this work 
+You need a credentials file to make this work
 This esp32 also collects data from another module via ESP-NOW
-Jan 2026 
+Jan 2026
 Kyle Hudson
 Live laugh love
 */
@@ -14,7 +14,8 @@ Live laugh love
 #include <RTClib.h>           // To convert data packet from unix time
 #include "credentials.h"      // personal credentials file, not tracked with Git
 #include <SD_MMC.h>           // to use SD card
-#include <WebServer.h>        // to host web server
+#include <WebServer.h>        // for web server
+#include <LittleFS.h>         // to save csv on board hardware
 
 WebServer server(80);
 
@@ -78,7 +79,7 @@ int lastCheckedDay = -1;  // To detect day rollover
 
 // Camera function
 bool initCamera() {
-  camera_config_t config;
+  camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;
@@ -102,6 +103,8 @@ bool initCamera() {
   config.frame_size = FRAMESIZE_VGA;
   config.jpeg_quality = 12;
   config.fb_count = 1;  // Allows only one frame cached
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   return esp_camera_init(&config) == ESP_OK;
 }
@@ -177,7 +180,7 @@ String buildTempSVG(uint32_t sinceUnix = 0) {
   float temps[MAX_LOG_POINTS];
   int count = 0;
 
-  File f = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+  File f = LittleFS.open(TEMP_LOG_FILE, FILE_READ);
   if (!f) return "<p>No data yet</p>";
   while (f.available() && count < MAX_LOG_POINTS) {
     String line = f.readStringUntil('\n');
@@ -193,7 +196,7 @@ String buildTempSVG(uint32_t sinceUnix = 0) {
   }
   f.close();
 
-  if (count < 2) return "<p>Not enough data yet</p>"; // will print with at least two points
+  if (count < 2) return "<p>Not enough data yet</p>";  // will print with at least two points
 
   // Find min/max
   float tMin = temps[0], tMax = temps[0];
@@ -231,6 +234,23 @@ String buildTempSVG(uint32_t sinceUnix = 0) {
   // Y-axis labels
   svg += "<text x='2' y='" + String(H - PAD) + "' font-size='10' fill='#666'>" + String(tMin, 1) + "C</text>";
   svg += "<text x='2' y='18' font-size='10' fill='#666'>" + String(tMax, 1) + "C</text>";
+
+  // X-axis time labels
+  DateTime startTime(xMin);
+  DateTime endTime(xMax);
+
+  char startLabel[12];
+  char endLabel[12];
+
+  snprintf(startLabel, sizeof(startLabel), "%02d:%02d",
+           startTime.hour(), startTime.minute());
+
+  snprintf(endLabel, sizeof(endLabel), "%02d:%02d",
+           endTime.hour(), endTime.minute());
+
+  svg += "<text x='" + String(PAD) + "' y='" + String(H - 8) + "' font-size='10' fill='#666'>" + String(startLabel) + "</text>";
+
+  svg += "<text x='" + String(W - 38) + "' y='" + String(H - 8) + "' font-size='10' fill='#666'>" + String(endLabel) + "</text>";
 
   svg += "</svg>";
   return svg;
@@ -289,16 +309,13 @@ void sendDailyEmail() {
         if (bufs[i]) {
           f.read(bufs[i], fileSize);
           f.close();
-
           snprintf(attNames[i], sizeof(attNames[i]), "photo_%s.jpg", photoHourLabels[i]);
-
           atts[i].descr.filename = attNames[i];
           atts[i].descr.mime = "image/jpeg";
           atts[i].blob.data = bufs[i];
           atts[i].blob.size = fileSize;
           atts[i].descr.transfer_encoding = Content_Transfer_Encoding::enc_base64;
           message.addAttachment(atts[i]);
-
           Serial.print("Attached: ");
           Serial.println(attNames[i]);
         } else {
@@ -358,7 +375,7 @@ void handleRoot() {
 void logTemperature(float temp, uint32_t unixTime) {
   // Count existing lines to enforce 144 point rolling window
   int lineCount = 0;
-  File f = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+  File f = LittleFS.open(TEMP_LOG_FILE, FILE_READ);
   if (f) {
     while (f.available()) {
       if (f.read() == '\n') lineCount++;
@@ -368,7 +385,7 @@ void logTemperature(float temp, uint32_t unixTime) {
 
   // If at max, rewrite file without the first line
   if (lineCount >= MAX_LOG_POINTS) {
-    File fin = SD_MMC.open(TEMP_LOG_FILE, FILE_READ);
+    File fin = LittleFS.open(TEMP_LOG_FILE, FILE_READ);
     String newContent = "";
     bool firstLine = true;
     while (fin.available()) {
@@ -380,13 +397,13 @@ void logTemperature(float temp, uint32_t unixTime) {
       newContent += line + "\n";
     }
     fin.close();
-    File fout = SD_MMC.open(TEMP_LOG_FILE, FILE_WRITE);
+    File fout = LittleFS.open(TEMP_LOG_FILE, FILE_WRITE);
     fout.print(newContent);
     fout.close();
   }
 
   // Append new point
-  File fa = SD_MMC.open(TEMP_LOG_FILE, FILE_APPEND);
+  File fa = LittleFS.open(TEMP_LOG_FILE, FILE_APPEND);
   if (fa) {
     fa.printf("%u,%.1f\n", unixTime, temp);
     fa.close();
@@ -400,6 +417,10 @@ void setup() {
   delay(1000);
   Serial.println("Setup started!");
   delay(500);
+
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS mount failed");
+  }
 
   Serial.println("Starting camera initialization...");
   delay(500);
@@ -446,7 +467,6 @@ void setup() {
 
   Serial.println("Waiting for first ESP-NOW time packet...");
 }
-
 
 void loop() {
 
@@ -495,11 +515,10 @@ void loop() {
 
     // Within the first 5 minutes of the target hour
     if (currentMinute > 5) continue;
-
     Serial.print("Taking scheduled photo for hour: ");
     Serial.println(PHOTO_HOURS[i]);
-
     camera_fb_t* fb = captureFreshPhoto();
+
     if (!fb) {
       Serial.println("Camera capture failed");
       continue;
@@ -512,7 +531,6 @@ void loop() {
     savedTemps[i] = lastPacket.temperature;
     savedHums[i] = lastPacket.humidity;
     savedTimes[i] = lastPacket.unixTime;
-
     photoTaken[i] = true;
     Serial.println("Photo slot complete");
   }
