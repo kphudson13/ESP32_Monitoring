@@ -9,6 +9,7 @@ Live laugh love
 #include <RTClib.h>            // Clock module
 #include <Wire.h>              // I2C protocol
 #include <esp_now.h>           // Esp now communication
+#include <esp_wifi.h> 
 #include <WiFi.h>              // Connect to wifi
 #include <Adafruit_GFX.h>      // Digital display
 #include <Adafruit_SSD1306.h>  // Digital display
@@ -78,6 +79,8 @@ void setup() {
   Serial.print("WiFi Channel: ");
   Serial.println(WiFi.channel());
 
+  esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);  // Match cam's WiFi channel
+
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed");
     return;
@@ -109,7 +112,7 @@ void setup() {
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, partnerMac, 6);
-  peerInfo.channel = 0;
+  peerInfo.channel = 11;
   peerInfo.encrypt = false;
 
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
