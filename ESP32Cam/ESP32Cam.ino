@@ -169,73 +169,87 @@ camera_fb_t* captureFreshPhoto() {
 char attNames[4][32];  // Declare above the loop
 
 String buildTempSVG(uint32_t sinceUnix = 0) {
-  // sinceUnix = 0 means use all available data (web)
-  // sinceUnix > 0 means only plot points after that time (email)
-
-  const int W = 500, H = 200;
+  const int W = 500;
+  const int H = 200;
   const int PAD = 40;
 
-  // Read CSV into arrays
   uint32_t times[MAX_LOG_POINTS];
   float temps[MAX_LOG_POINTS];
   int count = 0;
 
   File f = LittleFS.open(TEMP_LOG_FILE, FILE_READ);
   if (!f) return "<p>No data yet</p>";
+
   while (f.available() && count < MAX_LOG_POINTS) {
     String line = f.readStringUntil('\n');
-    if (line.length() < 3) continue;
+    line.trim();
+
     int comma = line.indexOf(',');
-    if (comma < 0) continue;
+    if (comma <= 0 || comma >= line.length() - 1) continue;
+
     uint32_t t = (uint32_t)line.substring(0, comma).toInt();
     float temp = line.substring(comma + 1).toFloat();
+
+    if (t == 0 || !isfinite(temp)) continue;
     if (sinceUnix > 0 && t < sinceUnix) continue;
+
     times[count] = t;
     temps[count] = temp;
     count++;
   }
   f.close();
 
-  if (count < 2) return "<p>Not enough data yet</p>";  // will print with at least two points
+  if (count < 2) return "<p>Not enough data yet</p>";
 
-  // Find min/max
-  float tMin = temps[0], tMax = temps[0];
+  float tMin = temps[0];
+  float tMax = temps[0];
+
   for (int i = 1; i < count; i++) {
     if (temps[i] < tMin) tMin = temps[i];
     if (temps[i] > tMax) tMax = temps[i];
   }
-  // Add padding to range
-  tMin -= 1.0;
-  tMax += 1.0;
 
-  uint32_t xMin = times[0], xMax = times[count - 1];
+  tMin -= 1.0f;
+  tMax += 1.0f;
 
-  // Build SVG
-  String svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + String(W) + "' height='" + String(H) + "'>";
+  uint32_t xMin = times[0];
+  uint32_t xMax = times[count - 1];
+
+  String svg;
+  svg.reserve(6000);
+
+  svg = "<svg xmlns='http://www.w3.org/2000/svg' ";
+  svg += "width='500' height='200' viewBox='0 0 500 200'>";
   svg += "<rect width='100%' height='100%' fill='#f9f9f9' rx='8'/>";
 
   // Axes
-  svg += "<line x1='" + String(PAD) + "' y1='10' x2='" + String(PAD) + "' y2='" + String(H - PAD) + "' stroke='#333' stroke-width='1'/>";
-  svg += "<line x1='" + String(PAD) + "' y1='" + String(H - PAD) + "' x2='" + String(W - 10) + "' y2='" + String(H - PAD) + "' stroke='#333' stroke-width='1'/>";
+  svg += "<line x1='40' y1='10' x2='40' y2='160' "
+         "stroke='#333' stroke-width='1'/>";
+  svg += "<line x1='40' y1='160' x2='490' y2='160' "
+         "stroke='#333' stroke-width='1'/>";
 
-  // Polyline points
-  String points = "";
+  // ---- Compact data  ----
+  String points;
+  points.reserve(count * 14);
+
   for (int i = 0; i < count; i++) {
-    float xRatio = (float)(times[i] - xMin) / (xMax - xMin);
+    float xRatio = (float)(times[i] - xMin) / (float)(xMax - xMin);
     float yRatio = (temps[i] - tMin) / (tMax - tMin);
+
     int px = PAD + (int)(xRatio * (W - PAD - 10));
     int py = (H - PAD) - (int)(yRatio * (H - PAD - 10));
+
+    px = constrain(px, PAD, W - 10);
+    py = constrain(py, 10, H - PAD);
+
     points += String(px) + "," + String(py) + " ";
-    // Dot
-    svg += "<circle cx='" + String(px) + "' cy='" + String(py) + "' r='3' fill='#e05c2a'/>";
   }
+
   svg += "<polyline points='" + points + "' fill='none' stroke='#e05c2a' stroke-width='1.5'/>";
 
-  // Y-axis labels
-  svg += "<text x='2' y='" + String(H - PAD) + "' font-size='10' fill='#666'>" + String(tMin, 1) + "C</text>";
+  svg += "<text x='2' y='160' font-size='10' fill='#666'>" + String(tMin, 1) + "C</text>";
   svg += "<text x='2' y='18' font-size='10' fill='#666'>" + String(tMax, 1) + "C</text>";
 
-  // X-axis time labels
   DateTime startTime(xMin);
   DateTime endTime(xMax);
 
@@ -244,13 +258,11 @@ String buildTempSVG(uint32_t sinceUnix = 0) {
 
   snprintf(startLabel, sizeof(startLabel), "%02d:%02d",
            startTime.hour(), startTime.minute());
-
   snprintf(endLabel, sizeof(endLabel), "%02d:%02d",
            endTime.hour(), endTime.minute());
 
-  svg += "<text x='" + String(PAD) + "' y='" + String(H - 8) + "' font-size='10' fill='#666'>" + String(startLabel) + "</text>";
-
-  svg += "<text x='" + String(W - 38) + "' y='" + String(H - 8) + "' font-size='10' fill='#666'>" + String(endLabel) + "</text>";
+  svg += "<text x='40' y='192' font-size='10' fill='#666'>" + String(startLabel) + "</text>";
+  svg += "<text x='462' y='192' font-size='10' fill='#666'>" + String(endLabel) + "</text>";
 
   svg += "</svg>";
   return svg;
@@ -281,7 +293,7 @@ void sendDailyEmail() {
   uint32_t cutoff = lastPacket.unixTime - 86400;
   String svgChart = buildTempSVG(cutoff);
 
-  String emailBody = "<h2>Daily Apartment Report</h2>";
+  String emailBody = "<h2>Daily Room Report</h2>";
   emailBody += "<p><b>Temperature at send time:</b> " + String(lastPacket.temperature, 1) + " &deg;C</p>";
   emailBody += "<p><b>Humidity:</b> " + String(lastPacket.humidity, 1) + " %</p>";
   emailBody += "<h3>Temperature - Last 24hrs</h3>";
@@ -352,7 +364,7 @@ void handleRoot() {
   html += "<meta http-equiv='refresh' content='30'>";
   html += "<style>body{font-family:sans-serif;padding:20px;} h1{color:#333;}</style>";
   html += "</head><body>";
-  html += "<h1>Apartment Monitor</h1>";
+  html += "<h1>Room Monitor</h1>";
 
   if (hasPacket) {
     DateTime now(lastPacket.unixTime);
@@ -420,6 +432,8 @@ void setup() {
 
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
+  } else {
+    cachedSVG = buildTempSVG();
   }
 
   Serial.println("Starting camera initialization...");
@@ -473,7 +487,7 @@ void loop() {
   server.handleClient();  // Launch server
 
   // Log every 10 minutes
-  if (hasPacket && millis() - lastLogTime >= LOG_INTERVAL) {
+  if (hasPacket && (lastLogTime == 0 || millis() - lastLogTime >= LOG_INTERVAL)) {
     logTemperature(lastPacket.temperature, lastPacket.unixTime);
     lastLogTime = millis();
   }
